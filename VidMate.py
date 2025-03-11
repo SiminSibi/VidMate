@@ -1,112 +1,249 @@
-import os
-import yt_dlp
-import instaloader
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+import requests
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime
+import logging
+import json
+import os
 
-# Function to download video from YouTube
-def download_youtube_video(url: str, quality: str):
-    ydl_opts = {
-        'outtmpl': 'downloads/%(title)s.%(ext)s',  # Save video in 'downloads' folder
-        'format': quality,  # Download with selected quality
+# Logging configuration
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration
+COINGECKO_API = "https://api.coingecko.com/api/v3"
+CURRENCIES = [
+    'bitcoin',        # بیت‌کوین (BTC)
+    'ethereum',       # اتریوم (ETH)
+    'tether',         # تتر (USDT) - استیبل‌کوین
+    'binancecoin',    # بایننس کوین (BNB)
+    'solana',         # سولانا (SOL)
+    'ripple',         # ریپل (XRP)
+    'cardano',        # کاردانو (ADA)
+    'dogecoin',       # دوج‌کوین (DOGE)
+    'tron',           # ترون (TRX)
+    'avalanche-2',    # آوالانچ (AVAX)
+    'shiba-inu',      # شیبا اینو (SHIB)
+    'polkadot',       # پولکادات (DOT)
+    'chainlink',      # چین‌لینک (LINK)
+    'matic-network',  # پالیگان (MATIC)
+    'uniswap',        # یونی‌سواپ (UNI)
+    'litecoin',       # لایت‌کوین (LTC)
+    'near',           # نیر پروتکل (NEAR)
+    'aptos',          # آپتوس (APT)
+    'cosmos',         # کازموس (ATOM)
+    'stellar',        # استلار (XLM)
+    'arbitrum',       # آربیتروم (ARB)
+    'optimism',       # آپتیمیزم (OP)
+    'filecoin',       # فایل‌کوین (FIL)
+    'hedera-hashgraph', # هدرا (HBAR)
+    'vechain',        # وی‌چین (VET)
+    'injective-protocol', # اینجکتیو (INJ)
+    'algorand',       # الگوراند (ALGO)
+    'quant-network',  # کوانت (QNT)
+    'maker',          # میکر (MKR)
+    'aave',           # آوه (AAVE)
+]
+CHECK_INTERVAL = 300  # Check every 5 minutes (in seconds)
+
+# Language dictionaries
+LANGUAGES = {
+    'en': {
+        'welcome': "Welcome to Crypto Bot!\nChoose an option:",
+        'price': "Price",
+        'set_alert': "Set Alert",
+        'language': "Change Language",
+        'current_price': "Current {coin} Price: ${price}\n24h Change: {change}%",
+        'alert_set': "Alert set for {coin} at ${price}",
+        'alert_triggered': "{coin} reached ${price}!\nCurrent price: ${current}",
+        'select_coin': "Select a cryptocurrency:",
+        'enter_price': "Enter target price for {coin}:"
+    },
+    'fa': {
+        'welcome': "به ربات کریپتو خوش آمدید!\nیک گزینه را انتخاب کنید:",
+        'price': "قیمت",
+        'set_alert': "تنظیم هشدار",
+        'language': "تغییر زبان",
+        'current_price': "قیمت فعلی {coin}: ${price}\nتغییر ۲۴ ساعته: {change}%",
+        'alert_set': "هشدار برای {coin} در قیمت ${price} تنظیم شد",
+        'alert_triggered': "{coin} به ${price} رسید!\nقیمت فعلی: ${current}",
+        'select_coin': "یک ارز دیجیتال انتخاب کنید:",
+        'enter_price': "قیمت هدف را برای {coin} وارد کنید:"
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(url, download=True)
-        video_file = ydl.prepare_filename(info_dict)
-    return video_file
+}
 
-# Function to download video from Instagram
-def download_instagram_video(url: str):
-    loader = instaloader.Instaloader()
-    loader.download_post(instaloader.Post.from_url(url), target='downloads')
-    # Video will be saved in 'downloads' folder
-    return 'downloads/'  # Here you need to specify the exact downloaded file
+# Data storage
+class Storage:
+    def __init__(self):
+        self.users = {}
+        self.alerts = {}
+        self.load_data()
 
-# Function to handle quality selection for downloading
-def quality_selection(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    quality = query.data
-    url = context.user_data.get('video_url')
+    def load_data(self):
+        if os.path.exists('data.json'):
+            with open('data.json', 'r') as f:
+                data = json.load(f)
+                self.users = data.get('users', {})
+                self.alerts = data.get('alerts', {})
 
+    def save_data(self):
+        with open('data.json', 'w') as f:
+            json.dump({'users': self.users, 'alerts': self.alerts}, f)
+
+storage = Storage()
+
+# Get crypto price from CoinGecko
+def get_crypto_price(coin_id):
     try:
-        video_file = download_youtube_video(url, quality)
-        query.message.reply_document(document=open(video_file, 'rb'))
-        os.remove(video_file)  # Delete the video after sending
+        url = f"{COINGECKO_API}/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
+        response = requests.get(url)
+        data = response.json()
+        price = data[coin_id]['usd']
+        change_24h = round(data[coin_id]['usd_24h_change'], 2)
+        return price, change_24h
     except Exception as e:
-        query.message.reply_text(f"Error downloading video: {str(e)}")
+        logger.error(f"Error fetching price: {e}")
+        return None, None
 
-# Function to ask for download quality after previewing video
-def ask_download_quality(update: Update, context: CallbackContext):
+# Check alerts
+async def check_alerts(context: ContextTypes.DEFAULT_TYPE):
+    current_prices = {}
+    for coin in CURRENCIES:
+        price, _ = get_crypto_price(coin)
+        if price:
+            current_prices[coin] = price
+
+    for user_id, alerts in list(storage.alerts.items()):
+        lang = storage.users.get(str(user_id), {}).get('lang', 'en')
+        for alert in alerts[:]:
+            coin, target_price = alert['coin'], alert['price']
+            current_price = current_prices.get(coin)
+            if current_price and (
+                (target_price > alert['original_price'] and current_price >= target_price) or
+                (target_price < alert['original_price'] and current_price <= target_price)
+            ):
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=LANGUAGES[lang]['alert_triggered'].format(
+                        coin=coin.capitalize(), 
+                        price=target_price,
+                        current=current_price
+                    )
+                )
+                alerts.remove(alert)
+    
+    storage.save_data()
+
+# Start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in storage.users:
+        storage.users[user_id] = {'lang': 'en'}
+    lang = storage.users[user_id]['lang']
+    
     keyboard = [
-        [InlineKeyboardButton("Best Quality", callback_data='best')],
-        [InlineKeyboardButton("High Quality", callback_data='22')],
-        [InlineKeyboardButton("Low Quality", callback_data='18')]
+        [InlineKeyboardButton(LANGUAGES[lang]['price'], callback_data='price'),
+         InlineKeyboardButton(LANGUAGES[lang]['set_alert'], callback_data='alert')],
+        [InlineKeyboardButton(LANGUAGES[lang]['language'], callback_data='language')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Do you want to download the video? Please select the quality:", reply_markup=reply_markup)
+    await update.message.reply_text(LANGUAGES[lang]['welcome'], reply_markup=reply_markup)
 
-# Function to handle incoming messages and process URLs
-def handle_message(update: Update, context: CallbackContext):
-    text = update.message.text
-    chat_id = update.message.chat_id
+# Button handler
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    lang = storage.users[user_id]['lang']
 
-    if 'youtube.com' in text or 'youtu.be' in text:
-        context.user_data['video_url'] = text
+    if query.data == 'price':
+        keyboard = [[InlineKeyboardButton(coin.capitalize(), callback_data=f'price_{coin}')] for coin in CURRENCIES]
+        await query.edit_message_text(
+            LANGUAGES[lang]['select_coin'],
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data == 'alert':
+        keyboard = [[InlineKeyboardButton(coin.capitalize(), callback_data=f'alert_{coin}')] for coin in CURRENCIES]
+        await query.edit_message_text(
+            LANGUAGES[lang]['select_coin'],
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data == 'language':
+        keyboard = [
+            [InlineKeyboardButton("English", callback_data='lang_en'),
+             InlineKeyboardButton("فارسی", callback_data='lang_fa')]
+        ]
+        await query.edit_message_text(
+            "Select language / زبان را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data.startswith('price_'):
+        coin = query.data.split('_')[1]
+        price, change = get_crypto_price(coin)
+        if price:
+            await query.edit_message_text(
+                LANGUAGES[lang]['current_price'].format(
+                    coin=coin.capitalize(),
+                    price=price,
+                    change=change
+                )
+            )
+    
+    elif query.data.startswith('alert_'):
+        coin = query.data.split('_')[1]
+        context.user_data['alert_coin'] = coin
+        await query.edit_message_text(LANGUAGES[lang]['enter_price'].format(coin=coin.capitalize()))
+    
+    elif query.data.startswith('lang_'):
+        new_lang = query.data.split('_')[1]
+        storage.users[user_id]['lang'] = new_lang
+        storage.save_data()
+        await start(update, context)
+
+# Handle price input for alerts
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'alert_coin' in context.user_data:
+        user_id = str(update.effective_user.id)
+        lang = storage.users[user_id]['lang']
+        coin = context.user_data['alert_coin']
+        
         try:
-            video_file = download_youtube_video(text, 'best')
-            update.message.reply_video(video=open(video_file, 'rb'))
-            os.remove(video_file)  # Delete the video after sending
-            ask_download_quality(update, context)
-        except Exception as e:
-            update.message.reply_text(f"Error processing YouTube video: {str(e)}")
-    elif 'instagram.com' in text:
-        try:
-            video_file = download_instagram_video(text)
-            update.message.reply_text("Instagram video has been downloaded! Further processing is needed to display it.")
-        except Exception as e:
-            update.message.reply_text(f"Error downloading video from Instagram: {str(e)}")
-    else:
-        update.message.reply_text("Please send a YouTube or Instagram video link.")
+            target_price = float(update.message.text)
+            current_price, _ = get_crypto_price(coin)
+            
+            if user_id not in storage.alerts:
+                storage.alerts[user_id] = []
+            storage.alerts[user_id].append({
+                'coin': coin,
+                'price': target_price,
+                'original_price': current_price
+            })
+            storage.save_data()
+            
+            await update.message.reply_text(
+                LANGUAGES[lang]['alert_set'].format(coin=coin.capitalize(), price=target_price)
+            )
+            del context.user_data['alert_coin']
+        except ValueError:
+            await update.message.reply_text("Please enter a valid number")
 
-# Function to send a welcome message when the bot is started
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text('Welcome! 🎉 Send me a YouTube or Instagram video link to download.')
-
-# Function to show help message
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text('Here is the list of commands:\n'
-                              '/start - Start the bot and receive instructions\n'
-                              'Send a YouTube video link - Download and send the video from YouTube\n'
-                              'Send an Instagram video link - Download and send the video from Instagram\n'
-                              'For any issues, send the video link again.')
-
-# Function to display developer information
-def developer_command(update: Update, context: CallbackContext):
-    update.message.reply_text(
-        "This bot is developed by SIMIN. ✨\n\n"
-        "Welcome to a world of automation and creativity! 🌟 Feel free to explore and enjoy. 😊"
-    )
-
-# Main function to set up and run the bot
 def main():
-    # Your bot's token
-    token = '7967739908:AAGxG9LRU9nFxDjqUS3TGfc33ji4-FKDz_s'
+    application = Application.builder().token('8003905325:AAGaLlv41FUe9RgHjFmeNDLrxSQAcWO7KXE').build()
     
-    # Set up the Updater and Dispatcher
-    updater = Updater(token, use_context=True)
-    dispatcher = updater.dispatcher
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_alerts, 'interval', seconds=CHECK_INTERVAL, args=[application])
+    scheduler.start()
 
-    # Add handlers for commands and messages
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(CommandHandler('help', help_command))
-    dispatcher.add_handler(CommandHandler('developer', developer_command))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dispatcher.add_handler(CallbackQueryHandler(quality_selection))
-    
-    # Start polling for updates
-    updater.start_polling()
-    updater.idle()
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
